@@ -2,4 +2,4 @@ requests
 feedparser
 html2text
 python-frontmatter
-
+python-dateutil
