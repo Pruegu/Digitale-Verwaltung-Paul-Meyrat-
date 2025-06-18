@@ -1,0 +1,7 @@
+title: Digitale Verwaltung_Paul Meyrat
+description: Automatisierter Re-Publish unter CC BY 4.0
+theme: minima        # einfaches Standard-Theme
+plugins:
+  - jekyll-feed
+  - jekyll-sitemap
+timezone: Europe/Zurich
