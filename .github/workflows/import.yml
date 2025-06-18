@@ -1,28 +1,26 @@
 name: Import LinkedIn newsletter
 on:
-  workflow_dispatch:
+  workflow_dispatch:         # ← manueller Start möglich
   schedule:
-    - cron: '0 3 * * *'       # täglich 03:00 UTC
+    - cron: '0 3 * * *'
 
 jobs:
   import:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
+        with: { persist-credentials: false }
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with: { python-version: '3.x' }
 
-      - name: Install libs
-        run: pip install feedparser readability-lxml html2text python-frontmatter
+      - run: pip install feedparser readability-lxml html2text python-frontmatter
 
-      - name: Fetch & convert
-        run: python .github/scripts/import_newsletter.py
+      - run: python .github/scripts/import_newsletter.py
 
       - name: Commit changes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: 'chore: update newsletter'
+          commit_message: 'feat: initial import of all newsletter editions'
+          commit_user_name: 'github-actions[bot]'
+          commit_user_email: '41898282+github-actions[bot]@users.noreply.github.com'
