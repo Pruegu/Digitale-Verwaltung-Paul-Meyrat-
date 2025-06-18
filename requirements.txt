@@ -3,3 +3,5 @@ feedparser
 html2text
 python-frontmatter
 python-dateutil
+beautifulsoup4         
+lxml                   
