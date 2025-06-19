@@ -1,92 +1,81 @@
-#!/usr/bin/env python3
-"""
-Backfill aller LinkedIn-Newsletter-Ausgaben:
-  1. Geht seitenweise durch das Archiv (?page=1,2,…)
-  2. Sammelt eindeutige Artikel-Links
-  3. Ruft jeden Artikel ab, wandelt HTML → Markdown
-  4. Schreibt unter _posts/YYYY-MM-DD-slug.md
-  ⚠︎  Nur einmal manuell ausführen (workflow_dispatch)
-"""
-import re, pathlib, datetime, time, requests, html2text, frontmatter
+import re, time, pathlib, datetime, requests, html2text, frontmatter, backoff
 from bs4 import BeautifulSoup
 from dateutil import parser as dtparse
 
 NEWSLETTER_ID = "7039205695174397952"
 ARCHIVE_URL   = f"https://www.linkedin.com/newsletters/{NEWSLETTER_ID}/"
-HEADERS       = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"}
-DST           = pathlib.Path("_posts")
-DST.mkdir(exist_ok=True)
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/126.0",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+DST = pathlib.Path("_posts"); DST.mkdir(exist_ok=True)
 
-# ---------- Helfer ---------- #
-def slugify(text: str) -> str:
-    text = text.lower()
-    subs = {"ä":"ae", "ö":"oe", "ü":"ue", "ß":"ss"}
-    for k, v in subs.items():
-        text = text.replace(k, v)
-    return re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+def slugify(txt):
+    return re.sub(r"[^a-z0-9]+", "-", txt.lower()).strip("-")
 
-def get_publish_date(html: str, url: str) -> datetime.datetime:
+@backoff.on_exception(backoff.expo,
+                      (requests.exceptions.RequestException,),
+                      max_tries=5, jitter=None)
+def get(url, **kw):
+    kw.setdefault("headers", HEADERS)
+    kw.setdefault("timeout", 20)
+    r = requests.get(url, **kw)
+    # LinkedIn Bot-Block liefert 999 – retry nach Delay
+    if r.status_code == 999:
+        raise requests.exceptions.HTTPError("LinkedIn anti-bot (999)")
+    r.raise_for_status()
+    return r
+
+# ---------- 1) Alle Archivseiten durchgehen ---------- #
+links, page = set(), 1
+while True:
+    arch = get(ARCHIVE_URL + f"?page={page}")
+    soup = BeautifulSoup(arch.text, "lxml")
+    cards = soup.select("a[href*='/pulse/']")
+    if not cards:
+        break
+    for a in cards:
+        href = a["href"].split("?")[0]
+        if "/pulse/" in href:
+            links.add(href)
+    page += 1
+    time.sleep(0.7)                     # kleiner Delay
+
+print(f"Gefundene Artikel-Links: {len(links)}")
+
+# ---------- 2) Einzelartikel verarbeiten ------------- #
+def extract_date(html, url):
     soup = BeautifulSoup(html, "lxml")
-    # 1) meta og:article:published_time (ISO)
-    meta = soup.find("meta", {"property": "og:article:published_time"})
-    if meta and meta.get("content"):
-        return dtparse.parse(meta["content"])
-    # 2) time tag
-    time_tag = soup.find("time")
-    if time_tag and time_tag.get("datetime"):
-        return dtparse.parse(time_tag["datetime"])
-    # 3) Fallback aus URL /yyyy/mm/dd/
+    m = soup.find("meta", property="og:article:published_time")
+    if m: return dtparse.parse(m["content"])
+    t = soup.find("time")
+    if t and t.get("datetime"): return dtparse.parse(t["datetime"])
     m = re.search(r"/(20\d{2})/(\d{2})/(\d{2})/", url)
-    if m:
-        y, mth, d = map(int, m.groups())
-        return datetime.datetime(y, mth, d)
+    if m: return datetime.datetime(int(m[1]), int(m[2]), int(m[3]))
     return datetime.datetime.now(datetime.timezone.utc)
 
-# ---------- 1. Alle Artikel-Links einsammeln ---------- #
-links = set()
-page  = 1
-while True:
-    url = ARCHIVE_URL + f"?page={page}"
-    r   = requests.get(url, headers=HEADERS, timeout=15)
-    if r.status_code != 200:
-        print("Archive fetch failed:", r.status_code, url)
-        break
-    soup = BeautifulSoup(r.text, "lxml")
-    cards = soup.select("a[href*='/pulse/']")  # Newsletter-Cards verlinken auf /pulse/
-    if not cards:
-        break  # keine weiteren Seiten
-    for a in cards:
-        href = a.get("href").split("?")[0]
-        if href.startswith("https://www.linkedin.com/pulse/"):
-            links.add(href)
-    print(f"Seite {page}: {len(cards)} Links gefunden")
-    page += 1
-    time.sleep(1)                               # Rate-Limit
-
-print("Gesamt-Links:", len(links))
-
-# ---------- 2. Jeden Artikel verarbeiten ---------- #
 for url in sorted(links):
-    html = requests.get(url, headers=HEADERS, timeout=15).text
-    soup = BeautifulSoup(html, "lxml")
-    title_tag = soup.find("h1")
-    title = title_tag.get_text(strip=True) if title_tag else "Ohne Titel"
-    pub   = get_publish_date(html, url)
-    slug  = slugify(title)
-    md    = DST / f"{pub:%Y-%m-%d}-{slug}.md"
-    if md.exists():
-        print("skip", md)
+    try:
+        html = get(url).text
+    except Exception as e:
+        print("❌  skip", url, "-", e)
         continue
 
-    body_md = html2text.html2text(html)
+    soup = BeautifulSoup(html, "lxml")
+    title = soup.find("h1").get_text(" ", strip=True)
+    pub   = extract_date(html, url)
+    mdpth = DST / f"{pub:%Y-%m-%d}-{slugify(title)}.md"
+    if mdpth.exists(): continue
+
+    md_body = html2text.html2text(html)
     post = frontmatter.Post(
-        body_md,
+        md_body,
         layout="post",
         title=title,
         date=pub.isoformat(),
         linkedin_url=url,
         license="CC BY 4.0",
     )
-    md.write_text(frontmatter.dumps(post), encoding="utf-8")
-    print("written", md)
-    time.sleep(0.5)                             # höfliche Pause
+    mdpth.write_text(frontmatter.dumps(post), encoding="utf-8")
+    print("✔  written", mdpth)
+    time.sleep(0.5)
